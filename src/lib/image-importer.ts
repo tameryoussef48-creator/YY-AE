@@ -381,6 +381,7 @@ export function reconstructWhiteboardElements(
         h,
         color: obj.color || "#1E1E1E",
         fill: Boolean(obj.fill),
+        bg: obj.bg || (obj.fill ? obj.color : undefined),
         width: strokeW,
         rotation: Number(obj.rotation) || 0,
       };
@@ -390,6 +391,99 @@ export function reconstructWhiteboardElements(
         backgroundShapes.push(el);
       } else {
         standardShapes.push(el);
+      }
+
+      if (obj.text && typeof obj.text === "string" && obj.text.trim()) {
+        textElements.push({
+          id: genId(),
+          type: "text",
+          text: obj.text.trim(),
+          x: wx + 8,
+          y: wy + Math.max(4, Math.round(h / 2 - 12)),
+          w: Math.max(30, w - 16),
+          h: Math.max(20, Math.round(h / 2)),
+          size: Math.max(12, Math.min(32, Math.round(h * 0.25))),
+          font: "Segoe UI,Inter,system-ui,sans-serif",
+          color: obj.color || "#1E1E1E",
+          bold: true,
+          italic: false,
+          underline: false,
+          rotation: 0,
+          isPlaceholder: false,
+        });
+      }
+    } else if (rawType === "table") {
+      const wx = mapX(obj.x);
+      const wy = mapY(obj.y);
+      const w = mapDim(obj.w ?? obj.width ?? 400);
+      const h = mapDim(obj.h ?? obj.height ?? 200, true);
+
+      const cells = Array.isArray(obj.cells) ? obj.cells : [];
+      if (cells.length > 0) {
+        for (const cell of cells) {
+          const cx = mapX(cell.x);
+          const cy = mapY(cell.y);
+          const cw = mapDim(cell.width ?? cell.w ?? 100);
+          const ch = mapDim(cell.height ?? cell.h ?? 30, true);
+          const isHeader = Boolean(cell.isHeader);
+          const cellBg = cell.bg || (isHeader ? "#f1f5f9" : "#ffffff");
+          const cellStroke = cell.stroke || "#cbd5e1";
+
+          backgroundShapes.push({
+            id: genId(),
+            type: "rect",
+            x: cx,
+            y: cy,
+            w: cw,
+            h: ch,
+            color: cellStroke,
+            fill: true,
+            bg: cellBg,
+            width: 1,
+            rotation: 0,
+          });
+
+          if (cell.text && String(cell.text).trim()) {
+            textElements.push({
+              id: genId(),
+              type: "text",
+              text: String(cell.text).trim(),
+              x: cx + 6,
+              y: cy + Math.max(2, Math.round(ch / 2 - 9)),
+              w: Math.max(20, cw - 12),
+              h: Math.max(16, ch - 4),
+              size: Math.max(
+                11,
+                Math.min(
+                  24,
+                  Math.round(
+                    (Number(cell.fontSize) || (isHeader ? 14 : 12)) * worldScale * scaleToNaturalX,
+                  ),
+                ),
+              ),
+              font: "Segoe UI,Inter,system-ui,sans-serif",
+              color: cell.color || (isHeader ? "#0f172a" : "#334155"),
+              bold: isHeader || Boolean(cell.bold),
+              italic: Boolean(cell.italic),
+              underline: false,
+              rotation: 0,
+              isPlaceholder: false,
+            });
+          }
+        }
+      } else {
+        standardShapes.push({
+          id: genId(),
+          type: "rect",
+          x: wx,
+          y: wy,
+          w,
+          h,
+          color: "#94a3b8",
+          fill: false,
+          width: 2,
+          rotation: 0,
+        });
       }
     } else if (
       rawType === "connector" ||

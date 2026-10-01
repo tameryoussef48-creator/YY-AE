@@ -5,9 +5,11 @@
  * - Microsoft Whiteboard exports & screenshots
  * - Photos of physical whiteboards
  * - Flowcharts, mind maps, architecture diagrams, wireframes & sketches
+ * - PDF document pages, slides & vector/raster mixes
+ * - Tables, handwritten notes, sticky notes & annotations
  *
  * Capabilities:
- * - Server-side Gemini Vision API (`@google/genai` with `DEFAULT_GEMINI_VISION_MODEL = "gemini-2.5-flash"`)
+ * - Server-side Gemini Vision API (@google/genai)
  * - Emits exact WhiteboardCanvasObject structures matching the native YY Canvas engine:
  *   (id, type, x, y, w, h, rotation, color, fill, width, text, size, font, bold, italic, underline, bg, points, src)
  */
@@ -17,7 +19,7 @@ import { GoogleGenAI } from "@google/genai";
 /**
  * Default Gemini Vision model.
  */
-export const DEFAULT_GEMINI_VISION_MODEL = "gemini-3.6-flash";
+export const DEFAULT_GEMINI_VISION_MODEL = "gemini-2.5-flash";
 
 export interface ConvertImageRequest {
   imageBase64: string;
@@ -78,6 +80,76 @@ export interface WhiteboardCanvasObject {
 }
 
 export type DetectedObject = WhiteboardCanvasObject;
+
+// Exported types for test suite and client consumption
+export type DetectedTextObject = {
+  type: "text";
+  text: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  fontSize: number;
+  color?: string | undefined;
+  bold?: boolean | undefined;
+  italic?: boolean | undefined;
+  underline?: boolean | undefined;
+  rotation?: number | undefined;
+};
+
+export type DetectedStickyObject = {
+  type: "sticky";
+  text?: string | undefined;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  bg?: string | undefined;
+  color?: string | undefined;
+  fontSize?: number | undefined;
+  rotation?: number | undefined;
+};
+
+export type DetectedShapeObject = {
+  type: "shape";
+  shapeType: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  color?: string | undefined;
+  fill?: boolean | undefined;
+  strokeWidth?: number | undefined;
+  rotation?: number | undefined;
+};
+
+export type DetectedConnectorObject = {
+  type: "connector";
+  connectorType: string;
+  startX: number;
+  startY: number;
+  endX: number;
+  endY: number;
+  color?: string | undefined;
+  strokeWidth?: number | undefined;
+};
+
+export type DetectedDrawingObject = {
+  type: "drawing";
+  points: Array<{ x: number; y: number }>;
+  color?: string | undefined;
+  strokeWidth?: number | undefined;
+  isHighlighter?: boolean | undefined;
+};
+
+export type DetectedEmbeddedImageObject = {
+  type: "embeddedImage";
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  description?: string | undefined;
+};
 
 export interface ConversionResponse {
   title: string;
@@ -188,7 +260,10 @@ function processRawAiObjects(
           : "#1E1E1E";
 
       const bold = item["fontWeight"] === "bold" || Boolean(item["bold"]);
-      const italic = item["fontStyle"] === "italic" || Boolean(item["italic"]);
+      const italic =
+        item["fontStyle"] === "italic" ||
+        item["fontWeight"] === "italic" ||
+        Boolean(item["italic"]);
       const fontFamily =
         typeof item["fontFamily"] === "string" && item["fontFamily"].trim()
           ? item["fontFamily"].trim()
@@ -206,7 +281,7 @@ function processRawAiObjects(
         rotation: 0,
         text,
         color,
-        size: Math.max(12, Math.min(120, Math.round(rawFontSize))),
+        size: Math.max(12, Math.min(140, Math.round(rawFontSize))),
         font: fontFamily,
         bold,
         italic,
@@ -214,17 +289,86 @@ function processRawAiObjects(
         isPlaceholder: false,
       });
     }
-    // 2. Rect / Sticky elements -> native "rect" / "roundRect" / "sticky" shape element type
-    else if (rawType === "rect" || rawType === "roundrect" || rawType === "sticky") {
+    // 2. Sticky notes
+    else if (rawType === "sticky") {
+      const rawX = Number(item["x"]) || 0;
+      const rawY = Number(item["y"]) || 0;
+      const rawW = Number(item["width"] ?? item["w"]) || 180;
+      const rawH = Number(item["height"] ?? item["h"]) || 140;
+
+      const x = Math.max(0, Math.min(width - 10, Math.round(rawX)));
+      const y = Math.max(0, Math.min(height - 10, Math.round(rawY)));
+      const w = Math.max(60, Math.min(width, Math.round(rawW)));
+      const h = Math.max(60, Math.min(height, Math.round(rawH)));
+
+      const text = item["text"] != null ? String(item["text"]).trim() : "";
+      const bg =
+        typeof item["bg"] === "string" && item["bg"].startsWith("#")
+          ? item["bg"]
+          : typeof item["fill"] === "string" && item["fill"].startsWith("#")
+            ? item["fill"]
+            : "#fef08a";
+
+      const color =
+        typeof item["color"] === "string" && item["color"].startsWith("#")
+          ? item["color"]
+          : "#422006";
+
+      const fontSize = Math.max(
+        12,
+        Math.min(48, Math.round(Number(item["fontSize"] ?? item["size"]) || 16)),
+      );
+
+      convertedObjects.push({
+        id: genId(),
+        type: "sticky",
+        x,
+        y,
+        w,
+        h,
+        rotation: 0,
+        text,
+        bg,
+        color,
+        size: fontSize,
+        font: "Segoe UI,Inter,system-ui,sans-serif",
+        bold: Boolean(item["bold"]),
+        italic: Boolean(item["italic"]),
+        underline: false,
+        isPlaceholder: !text,
+      });
+    }
+    // 3. Rect / RoundRect / Shapes (including triangle, diamond, star, hexagon, heart, ellipse, circle)
+    else if (
+      rawType === "rect" ||
+      rawType === "roundrect" ||
+      rawType === "shape" ||
+      rawType === "triangle" ||
+      rawType === "diamond" ||
+      rawType === "star" ||
+      rawType === "hexagon" ||
+      rawType === "heart"
+    ) {
       const rx = Number(item["rx"]) || 0;
-      const isSticky =
-        rawType === "sticky" || (item["type"] === "rect" && rx >= 12 && item["text"]);
-      const targetType: WhiteboardCanvasType = isSticky ? "sticky" : rx > 4 ? "roundRect" : "rect";
+      let targetType: WhiteboardCanvasType = "rect";
+      if (
+        rawType === "triangle" ||
+        rawType === "diamond" ||
+        rawType === "star" ||
+        rawType === "hexagon" ||
+        rawType === "heart"
+      ) {
+        targetType = rawType;
+      } else if (item["shapeType"] && typeof item["shapeType"] === "string") {
+        targetType = item["shapeType"] as WhiteboardCanvasType;
+      } else if (rawType === "roundrect" || rx > 4) {
+        targetType = "roundRect";
+      }
 
       const rawX = Number(item["x"]) || 0;
       const rawY = Number(item["y"]) || 0;
-      const rawW = Number(item["width"] ?? item["w"]) || (isSticky ? 180 : 120);
-      const rawH = Number(item["height"] ?? item["h"]) || (isSticky ? 140 : 80);
+      const rawW = Number(item["width"] ?? item["w"]) || 120;
+      const rawH = Number(item["height"] ?? item["h"]) || 80;
 
       const x = Math.max(0, Math.min(width - 10, Math.round(rawX)));
       const y = Math.max(0, Math.min(height - 10, Math.round(rawY)));
@@ -236,22 +380,18 @@ function processRawAiObjects(
           ? item["stroke"]
           : typeof item["color"] === "string" && item["color"].startsWith("#")
             ? item["color"]
-            : isSticky
-              ? "#422006"
-              : "#1E1E1E";
+            : "#1E1E1E";
 
       const fillVal = item["fill"];
       const isFilled = fillVal !== "transparent" && fillVal !== false && Boolean(fillVal);
       const bg =
-        typeof fillVal === "string" && fillVal.startsWith("#")
-          ? fillVal
-          : typeof item["bg"] === "string" && item["bg"].startsWith("#")
-            ? item["bg"]
-            : isSticky
-              ? "#fef08a"
-              : isFilled
-                ? stroke
-                : undefined;
+        typeof item["bg"] === "string" && item["bg"].startsWith("#")
+          ? item["bg"]
+          : typeof fillVal === "string" && fillVal.startsWith("#")
+            ? fillVal
+            : isFilled
+              ? stroke
+              : undefined;
 
       const strokeW = Math.max(
         1,
@@ -259,63 +399,42 @@ function processRawAiObjects(
       );
       const text = item["text"] != null ? String(item["text"]).trim() : "";
 
-      if (targetType === "sticky") {
+      convertedObjects.push({
+        id: genId(),
+        type: targetType,
+        x,
+        y,
+        w,
+        h,
+        rotation: 0,
+        color: stroke,
+        fill: isFilled,
+        bg: isFilled ? bg : undefined,
+        width: strokeW,
+      });
+
+      // If shape container had embedded label text, emit a paired text object inside the shape
+      if (text) {
         convertedObjects.push({
           id: genId(),
-          type: "sticky",
-          x,
-          y,
-          w: Math.max(100, w),
-          h: Math.max(80, h),
+          type: "text",
+          x: x + 8,
+          y: y + Math.max(4, Math.round(h / 2 - 12)),
+          w: Math.max(40, w - 16),
+          h: Math.max(20, Math.round(h / 2)),
           rotation: 0,
           text,
-          bg: bg || "#fef08a",
-          color: stroke || "#422006",
-          size: Math.max(12, Math.min(36, Number(item["fontSize"] ?? item["size"]) || 16)),
-          font: "Segoe UI,Inter,system-ui,sans-serif",
-          bold: Boolean(item["bold"]),
-          italic: Boolean(item["italic"]),
-          underline: false,
-          isPlaceholder: !text,
-        });
-      } else {
-        convertedObjects.push({
-          id: genId(),
-          type: targetType,
-          x,
-          y,
-          w,
-          h,
-          rotation: 0,
           color: stroke,
-          fill: isFilled,
-          bg: isFilled ? bg : undefined,
-          width: strokeW,
+          size: Math.max(12, Math.min(28, Math.round(h * 0.25))),
+          font: "Segoe UI,Inter,system-ui,sans-serif",
+          bold: true,
+          italic: false,
+          underline: false,
+          isPlaceholder: false,
         });
-
-        // If a shape container had embedded label text, emit a paired text object inside the shape
-        if (text) {
-          convertedObjects.push({
-            id: genId(),
-            type: "text",
-            x: x + 8,
-            y: y + Math.max(4, Math.round(h / 2 - 12)),
-            w: Math.max(40, w - 16),
-            h: Math.max(20, Math.round(h / 2)),
-            rotation: 0,
-            text,
-            color: stroke,
-            size: Math.max(12, Math.min(28, Math.round(h * 0.25))),
-            font: "Segoe UI,Inter,system-ui,sans-serif",
-            bold: true,
-            italic: false,
-            underline: false,
-            isPlaceholder: false,
-          });
-        }
       }
     }
-    // 3. Circle / Ellipse elements -> native "circle" shape element type
+    // 4. Circle / Ellipse elements -> native "circle" or "ellipse" shape element type
     else if (rawType === "circle" || rawType === "ellipse") {
       const radius = Number(item["radius"]) || 0;
       const rawW = radius > 0 ? radius * 2 : Number(item["width"] ?? item["w"]) || 100;
@@ -338,10 +457,10 @@ function processRawAiObjects(
       const fillVal = item["fill"];
       const isFilled = fillVal !== "transparent" && fillVal !== false && Boolean(fillVal);
       const bg =
-        typeof fillVal === "string" && fillVal.startsWith("#")
-          ? fillVal
-          : typeof item["bg"] === "string" && item["bg"].startsWith("#")
-            ? item["bg"]
+        typeof item["bg"] === "string" && item["bg"].startsWith("#")
+          ? item["bg"]
+          : typeof fillVal === "string" && fillVal.startsWith("#")
+            ? fillVal
             : isFilled
               ? stroke
               : undefined;
@@ -353,7 +472,7 @@ function processRawAiObjects(
 
       convertedObjects.push({
         id: genId(),
-        type: "circle",
+        type: rawType === "ellipse" ? "ellipse" : "circle",
         x,
         y,
         w,
@@ -386,7 +505,7 @@ function processRawAiObjects(
         });
       }
     }
-    // 4. Line / Arrow elements -> native "line" / "arrow" element type
+    // 5. Line / Arrow / DoubleArrow / Dashed
     else if (
       rawType === "line" ||
       rawType === "arrow" ||
@@ -394,13 +513,21 @@ function processRawAiObjects(
       rawType === "dashed" ||
       rawType === "connector"
     ) {
-      const targetType: WhiteboardCanvasType =
-        rawType === "arrow" || rawType === "connector" ? "arrow" : "line";
+      let targetType: WhiteboardCanvasType = "arrow";
+      if (rawType === "line") targetType = "line";
+      else if (rawType === "doublearrow") targetType = "doubleArrow";
+      else if (rawType === "dashed") targetType = "dashed";
+      else if (item["connectorType"]) {
+        const ct = String(item["connectorType"]).toLowerCase();
+        if (ct === "doublearrow") targetType = "doubleArrow";
+        else if (ct === "dashed") targetType = "dashed";
+        else if (ct === "line") targetType = "line";
+      }
 
-      const x1 = Number(item["x1"]);
-      const y1 = Number(item["y1"]);
-      const x2 = Number(item["x2"]);
-      const y2 = Number(item["y2"]);
+      const x1 = Number(item["x1"] ?? item["startX"]);
+      const y1 = Number(item["y1"] ?? item["startY"]);
+      const x2 = Number(item["x2"] ?? item["endX"]);
+      const y2 = Number(item["y2"] ?? item["endY"]);
 
       let sx = 0,
         sy = 0,
@@ -463,13 +590,182 @@ function processRawAiObjects(
         endY: ey,
       });
     }
+    // 6. Tables -> Deconstructed into real editable cell boxes and cell text elements!
+    else if (rawType === "table") {
+      const rawX = Number(item["x"]) || 0;
+      const rawY = Number(item["y"]) || 0;
+      const rawW = Number(item["width"] ?? item["w"]) || 400;
+      const rawH = Number(item["height"] ?? item["h"]) || 200;
+
+      const tableX = Math.max(0, Math.min(width - 10, Math.round(rawX)));
+      const tableY = Math.max(0, Math.min(height - 10, Math.round(rawY)));
+      const tableW = Math.max(60, Math.min(width, Math.round(rawW)));
+      const tableH = Math.max(40, Math.min(height, Math.round(rawH)));
+
+      const cells = Array.isArray(item["cells"])
+        ? (item["cells"] as Array<Record<string, unknown>>)
+        : [];
+
+      if (cells.length > 0) {
+        // Emit individual cell shapes & text elements
+        for (const cell of cells) {
+          const cx = Math.round(Number(cell["x"]) || tableX);
+          const cy = Math.round(Number(cell["y"]) || tableY);
+          const cw = Math.max(20, Math.round(Number(cell["width"] ?? cell["w"]) || 100));
+          const ch = Math.max(16, Math.round(Number(cell["height"] ?? cell["h"]) || 30));
+
+          const isHeader = Boolean(cell["isHeader"]);
+          const cellBg =
+            typeof cell["bg"] === "string" && cell["bg"].startsWith("#")
+              ? cell["bg"]
+              : isHeader
+                ? "#f1f5f9"
+                : "#ffffff";
+
+          const cellStroke =
+            typeof cell["stroke"] === "string" && cell["stroke"].startsWith("#")
+              ? cell["stroke"]
+              : "#cbd5e1";
+
+          // 1. Cell rectangle
+          convertedObjects.push({
+            id: genId(),
+            type: "rect",
+            x: cx,
+            y: cy,
+            w: cw,
+            h: ch,
+            rotation: 0,
+            color: cellStroke,
+            fill: true,
+            bg: cellBg,
+            width: 1,
+          });
+
+          // 2. Cell text
+          const cText = cell["text"] != null ? String(cell["text"]).trim() : "";
+          if (cText) {
+            const textColor =
+              typeof cell["color"] === "string" && cell["color"].startsWith("#")
+                ? cell["color"]
+                : isHeader
+                  ? "#0f172a"
+                  : "#334155";
+            const cFontSize = Math.max(
+              11,
+              Math.min(24, Math.round(Number(cell["fontSize"]) || (isHeader ? 14 : 13))),
+            );
+
+            convertedObjects.push({
+              id: genId(),
+              type: "text",
+              x: cx + 6,
+              y: cy + Math.max(2, Math.round(ch / 2 - 9)),
+              w: Math.max(20, cw - 12),
+              h: Math.max(16, ch - 4),
+              rotation: 0,
+              text: cText,
+              color: textColor,
+              size: cFontSize,
+              font: "Segoe UI,Inter,system-ui,sans-serif",
+              bold: isHeader || Boolean(cell["bold"]),
+              italic: Boolean(cell["italic"]),
+              underline: false,
+              isPlaceholder: false,
+            });
+          }
+        }
+      } else {
+        // Fallback: table outline rectangle
+        convertedObjects.push({
+          id: genId(),
+          type: "rect",
+          x: tableX,
+          y: tableY,
+          w: tableW,
+          h: tableH,
+          rotation: 0,
+          color: "#94a3b8",
+          fill: false,
+          width: 2,
+        });
+      }
+    }
+    // 7. Freehand drawings & ink marks (pen or highlighter)
+    else if (rawType === "drawing" || rawType === "pen" || rawType === "highlighter") {
+      const isHighlighter = rawType === "highlighter" || Boolean(item["isHighlighter"]);
+      const points = Array.isArray(item["points"])
+        ? (item["points"] as Array<Record<string, unknown>>)
+            .map((p) => ({
+              x: Math.round(Number(p["x"]) || 0),
+              y: Math.round(Number(p["y"]) || 0),
+            }))
+            .filter((p) => p.x >= 0 && p.y >= 0)
+        : [];
+
+      const stroke =
+        typeof item["stroke"] === "string" && item["stroke"].startsWith("#")
+          ? item["stroke"]
+          : typeof item["color"] === "string" && item["color"].startsWith("#")
+            ? item["color"]
+            : isHighlighter
+              ? "#fde047"
+              : "#1E1E1E";
+
+      const strokeW = Math.max(
+        1,
+        Math.min(
+          28,
+          Math.round(Number(item["strokeWidth"] ?? item["width"]) || (isHighlighter ? 12 : 3)),
+        ),
+      );
+
+      if (points.length >= 2) {
+        convertedObjects.push({
+          id: genId(),
+          type: isHighlighter ? "highlighter" : "pen",
+          x: points[0]?.x ?? 0,
+          y: points[0]?.y ?? 0,
+          w: 100,
+          h: 50,
+          rotation: 0,
+          color: stroke,
+          width: strokeW,
+          points,
+          opacity: isHighlighter ? 0.45 : 1,
+        });
+      }
+    }
+    // 8. Embedded Photos & Raster Artwork
+    else if (rawType === "image" || rawType === "embeddedimage") {
+      const rawX = Number(item["x"]) || 0;
+      const rawY = Number(item["y"]) || 0;
+      const rawW = Number(item["width"] ?? item["w"]) || 150;
+      const rawH = Number(item["height"] ?? item["h"]) || 120;
+
+      const x = Math.max(0, Math.min(width - 10, Math.round(rawX)));
+      const y = Math.max(0, Math.min(height - 10, Math.round(rawY)));
+      const w = Math.max(20, Math.min(width, Math.round(rawW)));
+      const h = Math.max(20, Math.min(height, Math.round(rawH)));
+
+      convertedObjects.push({
+        id: genId(),
+        type: "image",
+        x,
+        y,
+        w,
+        h,
+        rotation: 0,
+        src: typeof item["src"] === "string" ? item["src"] : undefined,
+      });
+    }
   }
 
   return convertedObjects;
 }
 
 /**
- * Calls server-side Gemini Vision API using @google/genai with gemini-2.5-flash.
+ * Calls server-side Gemini Vision API using @google/genai.
  * Exactly one request per conversion.
  */
 async function callGeminiVision(
@@ -496,35 +792,65 @@ async function callGeminiVision(
         ? "image/webp"
         : "image/png";
 
-  const prompt = `Analyze this whiteboard/diagram image (${width}x${height}px).
-Extract all visible text elements, rectangles/boxes, circles/ellipses, and lines/arrows into structured vector elements.
+  const prompt = `You are an expert AI vision system that deconstructs whiteboard photos, document screenshots, architecture diagrams, flowcharts, tables, mind maps, notes, and sketches into exact native vector elements.
 
-Requirements:
-- x/y are top-left pixel coordinates matching the image dimensions (${width}x${height}).
-- Split text into separate elements (title vs. paragraph vs. label).
-- Estimate font size (fontSize) from how large the text visually appears in pixels.
-- Use real hex colors seen in the image for fill, stroke, and text colors.
-- Only include elements actually visible in the image.
-- Return raw JSON only matching the schema.
+Analyze this image (${width}x${height}px).
+Extract and reconstruct ALL visible visual elements as structured vector elements:
 
-Output MUST be a single JSON object with this exact schema:
+1. TEXT:
+   - Extract titles, headings, body text, bullet points ("• ..."), numbered items, labels, and captions.
+   - For HANDWRITING: transcribe readable handwriting into clear editable text with its original color and size. If handwriting or doodle is uncertain, do not hallucinate fake words—emit it as ink drawing.
+   - Detect: text, x, y, width, height, fontSize (estimated px size on this canvas), fontWeight ("bold" | "normal"), fontStyle ("italic" | "normal"), color (real hex color), textAlign ("left" | "center" | "right").
+
+2. STICKY NOTES:
+   - Identify sticky notes / post-its.
+   - Detect: x, y, width, height, bg (exact hex background color, e.g. yellow #fef08a, orange #fed7aa, green #bbf7d0, cyan #bae6fd, pink #fbcfe8, purple #e9d5ff), text, color (text color, e.g. #422006), fontSize.
+
+3. SHAPES:
+   - Identify geometric shapes: "rect", "roundRect", "circle", "ellipse", "triangle", "diamond", "star", "hexagon", "heart".
+   - Detect: type, x, y, width, height, stroke (hex border color), strokeWidth (px), fill (true/false), bg (hex fill color if filled).
+   - If text is written inside the shape, include "text" property with the inside text.
+
+4. CONNECTORS & ARROWS:
+   - Identify lines and arrows connecting elements.
+   - Detect: type ("line" | "arrow" | "doubleArrow" | "dashed"), startX, startY, endX, endY, stroke (hex color), strokeWidth (px).
+
+5. TABLES:
+   - If there is a table or data grid, deconstruct it into:
+     type: "table", x, y, width, height, rows, cols, cells: [ { text, x, y, width, height, isHeader, bg, color, fontSize } ]
+
+6. DRAWINGS / INK:
+   - Freehand pen doodles, circles, arrows drawn by hand, or highlighter strokes.
+   - Detect: type ("pen" | "highlighter"), points: [{x, y}], stroke (hex color), strokeWidth.
+
+7. PHOTOS & COMPLEX ARTWORK:
+   - If there is an embedded photograph, screenshot, or complex raster artwork, mark as type: "image", x, y, width, height.
+
+CRITICAL RULES:
+- Coordinates (x, y, width, height) MUST match the image dimensions (${width}x${height}px).
+- PRESERVE REAL COLORS: Do NOT turn everything black! Use real hex colors seen in the image (#ef4444 red, #2563eb blue, #16a34a green, #f59e0b amber, #fef08a yellow, #8b5cf6 purple).
+- PRESERVE LAYOUT: Keep positions, hierarchy, and connections accurate.
+- Output raw JSON ONLY matching the schema. No markdown, no commentary.
+
+SCHEMA:
 {
+  "title": "Descriptive Diagram / Whiteboard Title",
   "canvasWidth": ${width},
   "canvasHeight": ${height},
-  "backgroundColor": "#ffffff",
   "elements": [
-    { "type": "text", "text": "string", "x": number, "y": number, "width": number, "height": number, "fontSize": number, "fontWeight": "normal" | "bold", "color": "#hex", "textAlign": "left" | "center" | "right" },
-    { "type": "rect", "x": number, "y": number, "width": number, "height": number, "fill": "#hex" | "transparent", "stroke": "#hex", "strokeWidth": number },
-    { "type": "circle", "x": number, "y": number, "radius": number, "fill": "#hex" | "transparent", "stroke": "#hex", "strokeWidth": number },
-    { "type": "line", "x1": number, "y1": number, "x2": number, "y2": number, "stroke": "#hex", "strokeWidth": number }
+    { "type": "text", "text": "...", "x": 10, "y": 20, "width": 200, "height": 30, "fontSize": 18, "fontWeight": "normal", "color": "#1e293b" },
+    { "type": "sticky", "text": "...", "x": 100, "y": 100, "width": 180, "height": 140, "bg": "#fef08a", "color": "#422006", "fontSize": 16 },
+    { "type": "rect", "x": 50, "y": 50, "width": 120, "height": 80, "fill": false, "stroke": "#2563eb", "strokeWidth": 2, "text": "Label" },
+    { "type": "circle", "x": 200, "y": 50, "width": 80, "height": 80, "fill": true, "bg": "#dbeafe", "stroke": "#2563eb", "strokeWidth": 2 },
+    { "type": "arrow", "startX": 170, "startY": 90, "endX": 200, "endY": 90, "stroke": "#64748b", "strokeWidth": 2 }
   ]
 }`;
 
   const candidateModels = [
+    DEFAULT_GEMINI_VISION_MODEL,
     "gemini-3.1-flash-lite",
     "gemini-3.7-flash",
     "gemini-flash-latest",
-    DEFAULT_GEMINI_VISION_MODEL,
   ];
 
   let rawText = "";
@@ -568,7 +894,6 @@ Output MUST be a single JSON object with this exact schema:
     } catch (err: unknown) {
       lastError = err instanceof Error ? err : new Error(String(err));
       console.warn(`[ImageConverter] Model ${modelName} failed:`, lastError.message);
-      // Immediately fallback to next model on error (including 429 rate limit or 404)
     }
   }
 
@@ -625,9 +950,25 @@ export function compileConversionResponse(
   for (const obj of validObjects) {
     if (obj.type === "text") textCount++;
     else if (obj.type === "sticky") stickyCount++;
-    else if (obj.type === "rect" || obj.type === "roundRect" || obj.type === "circle")
+    else if (
+      obj.type === "rect" ||
+      obj.type === "roundRect" ||
+      obj.type === "circle" ||
+      obj.type === "ellipse" ||
+      obj.type === "triangle" ||
+      obj.type === "diamond" ||
+      obj.type === "star" ||
+      obj.type === "hexagon" ||
+      obj.type === "heart"
+    )
       shapesCount++;
-    else if (obj.type === "line" || obj.type === "arrow") connectorsCount++;
+    else if (
+      obj.type === "line" ||
+      obj.type === "arrow" ||
+      obj.type === "doubleArrow" ||
+      obj.type === "dashed"
+    )
+      connectorsCount++;
     else if (obj.type === "pen" || obj.type === "highlighter") drawingsCount++;
     else if (obj.type === "image") imagesCount++;
   }
@@ -651,8 +992,7 @@ export function compileConversionResponse(
 }
 
 /**
- * Converts a whiteboard image / screenshot / diagram into native, editable whiteboard objects.
- * Exactly one Gemini 2.5 flash call. Never returns a flat image fallback.
+ * Converts a whiteboard image / screenshot / diagram / document page into native, editable whiteboard objects.
  */
 export async function convertWhiteboardImage(
   req: ConvertImageRequest,
@@ -660,13 +1000,12 @@ export async function convertWhiteboardImage(
   const { width, height, imageBase64, mimeType } = req;
 
   console.log(`[ImageConverter] ========================================`);
-  console.log(`[ImageConverter] Conversion started`);
-  console.log(`[ImageConverter] Target image dimensions: ${width}x${height}`);
+  console.log(`[ImageConverter] Conversion started (${width}x${height})`);
 
   const geminiResult = await callGeminiVision(imageBase64, mimeType, width, height);
 
   console.log(
-    `[ImageConverter] Successfully extracted ${geminiResult.objects.length} editable objects via Gemini 2.5 Flash`,
+    `[ImageConverter] Successfully extracted ${geminiResult.objects.length} editable objects via Gemini`,
   );
 
   return compileConversionResponse(geminiResult.title, width, height, geminiResult.objects);

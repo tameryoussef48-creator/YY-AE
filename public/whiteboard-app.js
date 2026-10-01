@@ -2367,85 +2367,108 @@ window.__hbiboInit = function (opts) {
     const testY = startBounds.y + dy;
     const testW = startBounds.w;
     const testH = startBounds.h;
+    if (testW <= 0 || testH <= 0) return { dx, dy, guides };
+
     const z = Math.max(0.05, state.camera.zoom);
-    const SNAP_DIST = 6 / z;
+    // Consistent canvas-coordinate snapping tolerance (6 world canvas units)
+    const SNAP_TOLERANCE = 6;
     const pad = 16 / z;
 
-    let bestSnapX = null,
-      bestDistX = SNAP_DIST;
-    let bestSnapY = null,
-      bestDistY = SNAP_DIST;
-    let guideX = null,
-      guideY = null;
-    let spacingGuideX = null,
-      spacingGuideY = null;
+    let bestSnapX = null;
+    let bestDistX = SNAP_TOLERANCE;
+    let bestSnapY = null;
+    let bestDistY = SNAP_TOLERANCE;
 
-    const curLeft = testX,
-      curRight = testX + testW,
-      curCenterX = testX + testW / 2;
-    const curTop = testY,
-      curBottom = testY + testH,
-      curCenterY = testY + testH / 2;
+    let guideX = null;
+    let guideY = null;
+    let spacingGuideX = null;
+    let spacingGuideY = null;
+
+    const curLeft = testX;
+    const curRight = testX + testW;
+    const curCenterX = testX + testW / 2;
+
+    const curTop = testY;
+    const curBottom = testY + testH;
+    const curCenterY = testY + testH / 2;
+
+    // Viewport-aware proximity filtering for smooth performance with large boards
+    const vp = typeof getVisibleWorldViewport === "function" ? getVisibleWorldViewport(300) : null;
 
     const otherBoxes = [];
-    for (let i = 0; i < state.elements.length; i++) {
-      const other = state.elements[i];
-      if (excludeIds.includes(other.id) || other.locked) continue;
+    const elements = state.elements || [];
+    const elemCount = elements.length;
+
+    for (let i = 0; i < elemCount; i++) {
+      const other = elements[i];
+      if (!other || other.locked || excludeIds.includes(other.id)) continue;
+      if (vp && typeof isElementInViewport === "function" && !isElementInViewport(other, vp)) {
+        continue;
+      }
       const ob = getBounds(other);
-      if (ob.w > 0 && ob.h > 0) {
-        if (other.rotation) {
-          const cx = ob.x + ob.w * 0.5;
-          const cy = ob.y + ob.h * 0.5;
-          const rad = (other.rotation * Math.PI) / 180;
-          const cos = Math.abs(Math.cos(rad));
-          const sin = Math.abs(Math.sin(rad));
-          const hw = ob.w * 0.5;
-          const hh = ob.h * 0.5;
-          const newHw = hw * cos + hh * sin;
-          const newHh = hw * sin + hh * cos;
-          otherBoxes.push({
-            id: other.id,
-            x: cx - newHw,
-            y: cy - newHh,
-            w: newHw * 2,
-            h: newHh * 2,
-            cx,
-            cy,
-          });
-        } else {
-          otherBoxes.push({
-            id: other.id,
-            x: ob.x,
-            y: ob.y,
-            w: ob.w,
-            h: ob.h,
-            cx: ob.x + ob.w / 2,
-            cy: ob.y + ob.h / 2,
-          });
-        }
+      if (!ob || ob.w <= 0 || ob.h <= 0) continue;
+
+      if (other.rotation) {
+        const cx = ob.x + ob.w * 0.5;
+        const cy = ob.y + ob.h * 0.5;
+        const rad = (other.rotation * Math.PI) / 180;
+        const cos = Math.abs(Math.cos(rad));
+        const sin = Math.abs(Math.sin(rad));
+        const hw = ob.w * 0.5;
+        const hh = ob.h * 0.5;
+        const newHw = hw * cos + hh * sin;
+        const newHh = hw * sin + hh * cos;
+        otherBoxes.push({
+          id: other.id,
+          x: cx - newHw,
+          y: cy - newHh,
+          w: newHw * 2,
+          h: newHh * 2,
+          cx,
+          cy,
+        });
+      } else {
+        otherBoxes.push({
+          id: other.id,
+          x: ob.x,
+          y: ob.y,
+          w: ob.w,
+          h: ob.h,
+          cx: ob.x + ob.w * 0.5,
+          cy: ob.y + ob.h * 0.5,
+        });
       }
     }
 
-    // 1. Single & Multi-item Smart Alignment Snapping
-    for (let i = 0; i < otherBoxes.length; i++) {
-      const ob = otherBoxes[i];
-      const oLeft = ob.x,
-        oRight = ob.x + ob.w,
-        oCenterX = ob.cx;
-      const oTop = ob.y,
-        oBottom = ob.y + ob.h,
-        oCenterY = ob.cy;
+    if (otherBoxes.length === 0) {
+      return { dx, dy, guides };
+    }
 
+    // 1. Detect meaningful alignment with nearby objects:
+    // Left-edge, Horizontal-center, Right-edge
+    // Top-edge, Vertical-center, Bottom-edge
+    const numBoxes = otherBoxes.length;
+    for (let i = 0; i < numBoxes; i++) {
+      const ob = otherBoxes[i];
+      const oLeft = ob.x;
+      const oRight = ob.x + ob.w;
+      const oCenterX = ob.cx;
+      const oTop = ob.y;
+      const oBottom = ob.y + ob.h;
+      const oCenterY = ob.cy;
+
+      // Horizontal alignments (X-axis alignments creating vertical guide line at targetLine):
+      // - Left-edge to Left-edge
+      // - Center to Center
+      // - Right-edge to Right-edge
+      // - Left-edge to Right-edge (adjacent)
+      // - Right-edge to Left-edge (adjacent)
       const xCandidates = [
-        { cur: curLeft, targetLine: oLeft, snapTarget: oLeft },
-        { cur: curRight, targetLine: oRight, snapTarget: oRight - testW },
-        { cur: curCenterX, targetLine: oCenterX, snapTarget: oCenterX - testW / 2 },
-        { cur: curLeft, targetLine: oRight, snapTarget: oRight },
-        { cur: curRight, targetLine: oLeft, snapTarget: oLeft - testW },
-        { cur: curCenterX, targetLine: oLeft, snapTarget: oLeft - testW / 2 },
-        { cur: curCenterX, targetLine: oRight, snapTarget: oRight - testW / 2 },
-        { cur: curLeft, targetLine: oCenterX, snapTarget: oCenterX },
-        { cur: curRight, targetLine: oCenterX, snapTarget: oCenterX - testW },
+        { cur: curLeft, targetLine: oLeft, snapTarget: oLeft, refBox: ob },
+        { cur: curCenterX, targetLine: oCenterX, snapTarget: oCenterX - testW / 2, refBox: ob },
+        { cur: curRight, targetLine: oRight, snapTarget: oRight - testW, refBox: ob },
+        { cur: curLeft, targetLine: oRight, snapTarget: oRight, refBox: ob },
+        { cur: curRight, targetLine: oLeft, snapTarget: oLeft - testW, refBox: ob },
       ];
 
       for (let j = 0; j < xCandidates.length; j++) {
@@ -2455,43 +2478,51 @@ window.__hbiboInit = function (opts) {
           bestDistX = diff;
           bestSnapX = c.snapTarget;
 
-          // Find all stationary boxes participating in this vertical alignment line
-          const aligned = otherBoxes.filter((b) => {
+          // Find participating boxes near this alignment line
+          const lineX = c.targetLine;
+          const alignedBoxes = otherBoxes.filter((b) => {
             return (
-              Math.abs(b.x - c.targetLine) < 1.5 ||
-              Math.abs(b.x + b.w - c.targetLine) < 1.5 ||
-              Math.abs(b.cx - c.targetLine) < 1.5
+              Math.abs(b.x - lineX) < 1.0 ||
+              Math.abs(b.x + b.w - lineX) < 1.0 ||
+              Math.abs(b.cx - lineX) < 1.0
             );
           });
+          if (!alignedBoxes.some((b) => b.id === ob.id)) {
+            alignedBoxes.push(ob);
+          }
+
           const allY = [
             testY,
             testY + testH,
-            ...aligned.map((b) => b.y),
-            ...aligned.map((b) => b.y + b.h),
+            ...alignedBoxes.map((b) => b.y),
+            ...alignedBoxes.map((b) => b.y + b.h),
           ];
           const minY = Math.min(...allY) - pad;
           const maxY = Math.max(...allY) + pad;
+
           guideX = {
             type: "align",
             axis: "x",
-            x1: c.targetLine,
+            x1: lineX,
             y1: minY,
-            x2: c.targetLine,
+            x2: lineX,
             y2: maxY,
           };
         }
       }
 
+      // Vertical alignments (Y-axis alignments creating horizontal guide line at targetLine):
+      // - Top-edge to Top-edge
+      // - Center to Center
+      // - Bottom-edge to Bottom-edge
+      // - Top-edge to Bottom-edge (adjacent)
+      // - Bottom-edge to Top-edge (adjacent)
       const yCandidates = [
-        { cur: curTop, targetLine: oTop, snapTarget: oTop },
-        { cur: curBottom, targetLine: oBottom, snapTarget: oBottom - testH },
-        { cur: curCenterY, targetLine: oCenterY, snapTarget: oCenterY - testH / 2 },
-        { cur: curTop, targetLine: oBottom, snapTarget: oBottom },
-        { cur: curBottom, targetLine: oTop, snapTarget: oTop - testH },
-        { cur: curCenterY, targetLine: oTop, snapTarget: oTop - testH / 2 },
-        { cur: curCenterY, targetLine: oBottom, snapTarget: oBottom - testH / 2 },
-        { cur: curTop, targetLine: oCenterY, snapTarget: oCenterY },
-        { cur: curBottom, targetLine: oCenterY, snapTarget: oCenterY - testH },
+        { cur: curTop, targetLine: oTop, snapTarget: oTop, refBox: ob },
+        { cur: curCenterY, targetLine: oCenterY, snapTarget: oCenterY - testH / 2, refBox: ob },
+        { cur: curBottom, targetLine: oBottom, snapTarget: oBottom - testH, refBox: ob },
+        { cur: curTop, targetLine: oBottom, snapTarget: oBottom, refBox: ob },
+        { cur: curBottom, targetLine: oTop, snapTarget: oTop - testH, refBox: ob },
       ];
 
       for (let j = 0; j < yCandidates.length; j++) {
@@ -2501,42 +2532,57 @@ window.__hbiboInit = function (opts) {
           bestDistY = diff;
           bestSnapY = c.snapTarget;
 
-          // Find all stationary boxes participating in this horizontal alignment line
-          const aligned = otherBoxes.filter((b) => {
+          // Find participating boxes near this alignment line
+          const lineY = c.targetLine;
+          const alignedBoxes = otherBoxes.filter((b) => {
             return (
-              Math.abs(b.y - c.targetLine) < 1.5 ||
-              Math.abs(b.y + b.h - c.targetLine) < 1.5 ||
-              Math.abs(b.cy - c.targetLine) < 1.5
+              Math.abs(b.y - lineY) < 1.0 ||
+              Math.abs(b.y + b.h - lineY) < 1.0 ||
+              Math.abs(b.cy - lineY) < 1.0
             );
           });
+          if (!alignedBoxes.some((b) => b.id === ob.id)) {
+            alignedBoxes.push(ob);
+          }
+
           const allX = [
             testX,
             testX + testW,
-            ...aligned.map((b) => b.x),
-            ...aligned.map((b) => b.x + b.w),
+            ...alignedBoxes.map((b) => b.x),
+            ...alignedBoxes.map((b) => b.x + b.w),
           ];
           const minX = Math.min(...allX) - pad;
           const maxX = Math.max(...allX) + pad;
+
           guideY = {
             type: "align",
             axis: "y",
             x1: minX,
-            y1: c.targetLine,
+            y1: lineY,
             x2: maxX,
-            y2: c.targetLine,
+            y2: lineY,
           };
         }
       }
     }
 
-    // 2. Smart Equal Spacing Assistance
+    // 2. Intelligent Equal Spacing Assistance
+    // Only detect among relevantly collinear/parallel objects to prevent unwanted snaps
     if (otherBoxes.length >= 2) {
-      // Horizontal Equal Spacing
-      const sortedX = otherBoxes.slice().sort((a, b) => a.x - b.x);
-      for (let i = 0; i < sortedX.length - 1; i++) {
-        const A = sortedX[i];
-        const B = sortedX[i + 1];
+      // Horizontal equal spacing (objects in roughly the same row / vertical overlap)
+      const rowBoxes = otherBoxes
+        .filter((b) => {
+          const overlap = Math.min(curBottom, b.y + b.h) - Math.max(curTop, b.y);
+          const centerDiff = Math.abs(b.cy - curCenterY);
+          return overlap > -40 || centerDiff < Math.max(b.h, testH) * 1.5;
+        })
+        .sort((a, b) => a.x - b.x);
+
+      for (let i = 0; i < rowBoxes.length - 1; i++) {
+        const A = rowBoxes[i];
+        const B = rowBoxes[i + 1];
         const gapAB = B.x - (A.x + A.w);
+
         if (gapAB > 4) {
           // Case 1: Dragging M in between A and B
           if (gapAB > testW + 4) {
@@ -2595,12 +2641,20 @@ window.__hbiboInit = function (opts) {
         }
       }
 
-      // Vertical Equal Spacing
-      const sortedY = otherBoxes.slice().sort((a, b) => a.y - b.y);
-      for (let i = 0; i < sortedY.length - 1; i++) {
-        const A = sortedY[i];
-        const B = sortedY[i + 1];
+      // Vertical equal spacing (objects in roughly the same column / horizontal overlap)
+      const colBoxes = otherBoxes
+        .filter((b) => {
+          const overlap = Math.min(curRight, b.x + b.w) - Math.max(curLeft, b.x);
+          const centerDiff = Math.abs(b.cx - curCenterX);
+          return overlap > -40 || centerDiff < Math.max(b.w, testW) * 1.5;
+        })
+        .sort((a, b) => a.y - b.y);
+
+      for (let i = 0; i < colBoxes.length - 1; i++) {
+        const A = colBoxes[i];
+        const B = colBoxes[i + 1];
         const gapAB = B.y - (A.y + A.h);
+
         if (gapAB > 4) {
           // Case 1: Dragging M in between A and B
           if (gapAB > testH + 4) {

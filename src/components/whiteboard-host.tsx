@@ -8,6 +8,11 @@ import {
   analyzeWhiteboardImage,
   reconstructWhiteboardElements,
 } from "@/lib/image-importer";
+import {
+  convertMixedFilesToEditableElements,
+  convertFilesToSingleCombinedBoard,
+  globalBatchManager,
+} from "@/lib/batch-converter";
 
 function loadScript(src: string) {
   return new Promise<void>((resolve, reject) => {
@@ -49,6 +54,11 @@ type HbiboWindow = {
     analyzeWhiteboardImage: typeof analyzeWhiteboardImage;
     reconstructWhiteboardElements: typeof reconstructWhiteboardElements;
   };
+  BatchConverter?: {
+    convertMixedFilesToEditableElements: typeof convertMixedFilesToEditableElements;
+    convertFilesToSingleCombinedBoard: typeof convertFilesToSingleCombinedBoard;
+    globalBatchManager: typeof globalBatchManager;
+  };
 };
 
 export function WhiteboardHost({ boardId, onHome }: { boardId: string; onHome?: () => void }) {
@@ -67,6 +77,11 @@ export function WhiteboardHost({ boardId, onHome }: { boardId: string; onHome?: 
         prepareImageForAnalysis,
         analyzeWhiteboardImage,
         reconstructWhiteboardElements,
+      };
+      win.BatchConverter = {
+        convertMixedFilesToEditableElements,
+        convertFilesToSingleCombinedBoard,
+        globalBatchManager,
       };
 
       let initialBoard: BoardRecord | null = getWorkspaceBoardPayload(boardId);

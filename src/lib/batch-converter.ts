@@ -734,3 +734,313 @@ class GlobalBatchManager {
 }
 
 export const globalBatchManager = new GlobalBatchManager();
+
+export interface ConvertedDocumentSummary {
+  totalFiles: number;
+  totalPages: number;
+  totalElements: number;
+  succeeded: Array<{ name: string; elementCount: number }>;
+  failed: Array<{ name: string; reason: string }>;
+  elements: any[];
+  bounds: { x: number; y: number; width: number; height: number };
+}
+
+/**
+ * Converts single or multiple whiteboard images, normal images, PDFs, or mixed files
+ * into native editable whiteboard elements.
+ * Never flattens documents into giant images.
+ * Arranges multiple documents side-by-side or in a clean grid with generous spacing.
+ */
+export async function convertMixedFilesToEditableElements(
+  files: File[],
+  options: {
+    onProgress?: (status: string, current: number, total: number) => void;
+    signal?: AbortSignal;
+    originX?: number;
+    originY?: number;
+  } = {},
+): Promise<ConvertedDocumentSummary> {
+  const { onProgress, signal, originX = 0, originY = 0 } = options;
+
+  type PageTask = {
+    docName: string;
+    pageLabel: string;
+    isPdf: boolean;
+    dataUrl?: string;
+    file?: File;
+  };
+
+  const tasks: PageTask[] = [];
+
+  for (const file of files) {
+    const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name);
+    const cleanName = stripFileExtension(file.name) || file.name;
+
+    if (isPdf) {
+      try {
+        const pages = await renderPdfToImages(file);
+        pages.forEach((p, idx) => {
+          tasks.push({
+            docName: cleanName,
+            pageLabel: pages.length === 1 ? cleanName : `${cleanName} • Page ${idx + 1}`,
+            isPdf: true,
+            dataUrl: p.dataUrl,
+          });
+        });
+      } catch (err: any) {
+        console.warn(`Failed to render PDF ${file.name}:`, err);
+        tasks.push({
+          docName: cleanName,
+          pageLabel: cleanName,
+          isPdf: true,
+          file,
+        });
+      }
+    } else {
+      tasks.push({
+        docName: cleanName,
+        pageLabel: cleanName,
+        isPdf: false,
+        file,
+      });
+    }
+  }
+
+  const totalTasks = tasks.length;
+  const succeeded: Array<{ name: string; elementCount: number }> = [];
+  const failed: Array<{ name: string; reason: string }> = [];
+
+  type ConvertedBlock = {
+    label: string;
+    elements: any[];
+    width: number;
+    height: number;
+  };
+
+  const convertedBlocks: ConvertedBlock[] = [];
+
+  for (let i = 0; i < totalTasks; i++) {
+    if (signal?.aborted) {
+      throw new Error("Conversion cancelled by user");
+    }
+
+    const task = tasks[i];
+    if (!task) continue;
+
+    onProgress?.(`Analyzing ${task.pageLabel} (${i + 1}/${totalTasks})...`, i + 1, totalTasks);
+
+    try {
+      let prepared: {
+        base64: string;
+        mimeType: string;
+        width: number;
+        height: number;
+        originalImg: HTMLImageElement;
+      };
+
+      if (task.dataUrl) {
+        prepared = await prepareDataUrlForAnalysis(task.dataUrl);
+      } else if (task.file) {
+        // Check for Smart PNG fast path
+        if (task.file.type === "image/png" || /\.png$/i.test(task.file.name)) {
+          try {
+            const smartData = await extractSmartPngMetadata(task.file);
+            if (smartData && Array.isArray(smartData.elements) && smartData.elements.length > 0) {
+              succeeded.push({ name: task.pageLabel, elementCount: smartData.elements.length });
+              convertedBlocks.push({
+                label: task.pageLabel,
+                elements: smartData.elements,
+                width: 900,
+                height: 600,
+              });
+              continue;
+            }
+          } catch {
+            /* proceed to standard analysis */
+          }
+        }
+        prepared = await prepareImageForAnalysis(task.file);
+      } else {
+        throw new Error("Missing file or image data");
+      }
+
+      onProgress?.(
+        `Recognizing shapes, text & diagrams in ${task.pageLabel}...`,
+        i + 1,
+        totalTasks,
+      );
+
+      const aiResult = await analyzeWhiteboardImage(
+        {
+          base64: prepared.base64,
+          mimeType: prepared.mimeType,
+          width: prepared.width,
+          height: prepared.height,
+        },
+        (status) => {
+          onProgress?.(`${task.pageLabel}: ${status}`, i + 1, totalTasks);
+        },
+        signal,
+      );
+
+      const reconstructed = reconstructWhiteboardElements(aiResult, prepared.originalImg, {
+        targetCenter: { x: 0, y: 0 },
+      });
+
+      if (!reconstructed.elements || reconstructed.elements.length === 0) {
+        throw new Error("No editable elements could be recognized");
+      }
+
+      succeeded.push({ name: task.pageLabel, elementCount: reconstructed.elements.length });
+      convertedBlocks.push({
+        label: task.pageLabel,
+        elements: reconstructed.elements,
+        width: Math.max(300, reconstructed.bounds.width),
+        height: Math.max(200, reconstructed.bounds.height),
+      });
+    } catch (err: any) {
+      console.warn(`[BatchConverter] ${task.pageLabel} failed:`, err);
+      failed.push({
+        name: task.pageLabel,
+        reason: err?.message || "Vision recognition failed",
+      });
+    }
+  }
+
+  if (convertedBlocks.length === 0 && failed.length > 0) {
+    const errorDetails = failed.map((f) => `• ${f.name}: ${f.reason}`).join("\n");
+    throw new Error(`None of the uploaded files could be converted:\n${errorDetails}`);
+  }
+
+  // Layout all converted blocks side-by-side or in a neat multi-column grid
+  const B = convertedBlocks.length;
+  const cols = B <= 3 ? B : Math.ceil(Math.sqrt(B));
+  const gap = 120;
+
+  const colWidths = new Array(cols).fill(0);
+  const rowsCount = Math.ceil(B / cols);
+  const rowHeights = new Array(rowsCount).fill(0);
+
+  for (let i = 0; i < B; i++) {
+    const c = i % cols;
+    const r = Math.floor(i / cols);
+    colWidths[c] = Math.max(colWidths[c], convertedBlocks[i]!.width);
+    rowHeights[r] = Math.max(rowHeights[r], convertedBlocks[i]!.height);
+  }
+
+  const totalGridW = colWidths.reduce((a, b) => a + b, 0) + (cols - 1) * gap;
+  const totalGridH = rowHeights.reduce((a, b) => a + b, 0) + (rowsCount - 1) * gap;
+
+  const colOffsets = [0];
+  for (let c = 1; c < cols; c++) colOffsets[c] = colOffsets[c - 1]! + colWidths[c - 1]! + gap;
+  const rowOffsets = [0];
+  for (let r = 1; r < rowsCount; r++) rowOffsets[r] = rowOffsets[r - 1]! + rowHeights[r - 1]! + gap;
+
+  const gridStartX = Math.round(originX - totalGridW / 2);
+  const gridStartY = Math.round(originY - totalGridH / 2);
+
+  const finalElements: any[] = [];
+
+  for (let i = 0; i < B; i++) {
+    const block = convertedBlocks[i]!;
+    const c = i % cols;
+    const r = Math.floor(i / cols);
+
+    const cellX = gridStartX + colOffsets[c]!;
+    const cellY = gridStartY + rowOffsets[r]!;
+    const blockCenterX = cellX + colWidths[c]! / 2;
+    const blockCenterY = cellY + rowHeights[r]! / 2;
+
+    // Shift block elements from their local origin (0, 0) to their target cell center
+    for (const el of block.elements) {
+      const cloned = JSON.parse(JSON.stringify(el));
+      cloned.id = genBoardId();
+
+      if (cloned.points && Array.isArray(cloned.points)) {
+        cloned.points = cloned.points.map((p: any) => ({
+          x: p.x + blockCenterX,
+          y: p.y + blockCenterY,
+        }));
+      } else {
+        if (cloned.x != null) cloned.x += blockCenterX;
+        if (cloned.y != null) cloned.y += blockCenterY;
+        if (cloned.startX != null) cloned.startX += blockCenterX;
+        if (cloned.startY != null) cloned.startY += blockCenterY;
+        if (cloned.endX != null) cloned.endX += blockCenterX;
+        if (cloned.endY != null) cloned.endY += blockCenterY;
+      }
+
+      finalElements.push(cloned);
+    }
+  }
+
+  return {
+    totalFiles: files.length,
+    totalPages: totalTasks,
+    totalElements: finalElements.length,
+    succeeded,
+    failed,
+    elements: finalElements,
+    bounds: {
+      x: gridStartX,
+      y: gridStartY,
+      width: totalGridW,
+      height: totalGridH,
+    },
+  };
+}
+
+/**
+ * Converts multiple images and/or PDFs into a single combined BoardRecord with all editable elements.
+ */
+export async function convertFilesToSingleCombinedBoard(
+  files: File[],
+  options: {
+    onProgress?: (status: string, current: number, total: number) => void;
+    title?: string;
+  } = {},
+): Promise<{ board: BoardRecord; summary: ConvertedDocumentSummary }> {
+  const summary = await convertMixedFilesToEditableElements(files, {
+    onProgress: options.onProgress,
+  });
+
+  const firstTitle = stripFileExtension(files[0]?.name || "") || "Whiteboard";
+  const boardTitle =
+    options.title ||
+    (files.length === 1
+      ? firstTitle
+      : files.length <= 3
+        ? files.map((f) => stripFileExtension(f.name)).join(", ")
+        : `${firstTitle} & ${files.length - 1} more`);
+
+  const cat = autoExtractPhaseAndWeek(boardTitle);
+  const baseTime = Date.now();
+
+  const board: BoardRecord = {
+    ...blankBoard(boardTitle),
+    id: genBoardId(),
+    name: boardTitle,
+    phase: cat.phase,
+    week: cat.week,
+    phase_category: cat.phase_category,
+    week_category: cat.week_category,
+    createdAt: baseTime,
+    updatedAt: baseTime,
+    needsFitToScreen: true,
+    elements: summary.elements,
+    camera: {
+      x: -Math.round(summary.bounds.x + summary.bounds.width / 2),
+      y: -Math.round(summary.bounds.y + summary.bounds.height / 2),
+      zoom: 1,
+    },
+  };
+
+  try {
+    board.thumb = await generateBoardThumbnail(board);
+  } catch {
+    /* ignore */
+  }
+
+  await putBoard(board);
+  return { board, summary };
+}
